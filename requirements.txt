@@ -1,0 +1,14 @@
+pandas
+numpy==1.26.4
+matplotlib
+seaborn
+tqdm
+boto3
+holidays
+hf_transfer
+chronos-forecasting>=2.0
+chronos-forecasting[training]
+peft 
+accelerate 
+optuna
+torch

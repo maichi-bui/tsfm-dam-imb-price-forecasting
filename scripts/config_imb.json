@@ -1,0 +1,60 @@
+{
+    "dataset_name": "imb",
+    "model_id": "autogluon/chronos-2",
+    "train_csv": "../dataset/imb/data_train.csv",
+    "test_csv": "../dataset/imb/data_test.csv",
+    "timestamp_column": "timestamp",
+    "target_column": "pos_ip",
+    "output_dir": "../outputs/chronos2_lora",
+    "forecast_csv": "../raw_forecasts_dam/chronos2_lora_tuned.csv",
+    "train_end": "2022-09-30 23:00:00",
+    "val_start": "2022-10-01 00:00:00",
+    "val_end": "2022-12-31 23:00:00",
+    "forecast_start": "2023-01-01",
+    "forecast_end": "2024-01-01",
+    "horizon": "2 hour",
+    "step": "15 minutes",
+    "infer_batch_size": 32,
+    "context_lengths": [
+        8192
+    ],
+    "infer_context_length": 2048,
+    "prediction_length": 8,
+    "quantile_levels": [
+        0.1,
+        0.5,
+        0.9
+    ],
+    "lora_r": 8,
+    "lora_alpha": 16,
+    "lora_dropout": 0.1,
+    "lora_target_modules": [
+        "q",
+        "k",
+        "v"
+    ],
+    "lr": 5e-5,
+    "weight_decay": 0.01,
+    "batch_size": 16,
+    "max_steps": 2000,
+    "eval_every": 100,
+    "patience": 5,
+    "grad_clip": 1.0,
+    "seed": 42,
+    "num_workers": 2,
+    "add_temporal_features": false,
+    "past_covariates": [
+        "da_price",
+        "si"
+    ],
+    "future_covariates": [
+        "da_price"
+    ],
+    "temporal_covariates": [
+        "Week_cos",
+        "Week_sin",
+        "Day_cos",
+        "Day_sin",
+        "Holidays"
+    ]
+}
