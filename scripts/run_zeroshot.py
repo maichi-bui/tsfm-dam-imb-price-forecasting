@@ -127,9 +127,7 @@ def main():
     context_columns = [cfg['timestamp_column'],
                        args.id_column, cfg['target_column']]
     future_cols = [cfg['timestamp_column'],
-                   args.id_column]
-    cfg['temporal_covariates'] = ["Week_cos",
-                                  "Week_sin", "Day_cos", "Day_sin", "Holidays"]
+                   args.id_column]    
     has_future = False
 
     if args.mode == "ARX":
@@ -183,13 +181,13 @@ def main():
                 future_cols,
                 is_imb
             )
-            context_frame['virtual_id'] = f"BE_DAM_{i}_{str(cutoff)}"  # id of the batch
+            context_frame['virtual_id'] = f"BE_{i}_{str(cutoff)}"  # id of the batch
             batch_contexts.append(context_frame)
 
             if len(future_frame) == 0:
                 has_future = False
                 continue
-            future_frame['virtual_id'] = f"BE_DAM_{i}"
+            future_frame['virtual_id'] = f"BE_{i}_{str(cutoff)}"
             batch_futures.append(future_frame)
 
         batch_df = pd.concat(batch_contexts, ignore_index=True).drop('id',axis=1)

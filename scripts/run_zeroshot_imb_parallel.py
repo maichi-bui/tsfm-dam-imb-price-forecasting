@@ -1,15 +1,3 @@
-"""
-run_zeroshot.py — Zero-shot Chronos-2 inference runner.
-
-This script runs rolling zero-shot forecasts using a pretrained Chronos-2 pipeline.
-It supports two modes:
-  - AR: autoregressive univariate forecasting using only the target series.
-  - ARX: autoregressive forecasting with covariates.
-
-Temporal features can be added to the input data before inference, and the model's
-context length is adjustable via `pipeline.model.chronos_config.context_length.`
-"""
-
 import argparse
 import os
 from typing import Iterable
@@ -27,7 +15,7 @@ CONFIG = load_config('./config_imb.json')
 NUM_WORKERS = 4          # 4 workers × 4 threads = 16 cores fully used
 THREADS_PER_WORKER = 16 // NUM_WORKERS
 BATCH_SIZE = 32
-# BATCH_CONTEXT = 64
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run zero-shot Chronos-2 forecasts with varying context length and covariates."
@@ -98,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="raw_forecast_imb",
+        default="raw_forecast",
         help="Directory where forecast CSV files will be written.",
     )
     parser.add_argument(
@@ -225,18 +213,21 @@ def main():
     print(
         f"Using {len(cutoff_dates)} cutoff dates from {cutoff_dates[0]} to {cutoff_dates[-1]}.")
 
-    required_columns = {args.target_column,
-                        args.id_column, args.timestamp_column}
+    context_columns = [args.timestamp_column, args.id_column, args.target_column]
+    future_cols = [args.timestamp_column, args.id_column]    
     if args.mode == "ARX":
-        required_columns.update(args.features)
+        context_columns.extend(CONFIG['past_covariates'])
+        if len(CONFIG['future_covariates']) > 0:
+            future_cols.extend(CONFIG['future_covariates'])
         if args.add_temporal_features:
-            required_columns.update(
-                ["Week_cos", "Week_sin", "Day_cos", "Day_sin", "Holidays"])
+            context_columns.extend(CONFIG['temporal_covariates'])
+            future_cols.extend(CONFIG['temporal_covariates'])
 
-    missing = required_columns - set(df_all.columns)
+    missing = set(context_columns).union(
+        set(future_cols)) - set(df_all.columns)
     if missing:
         raise ValueError(f"Missing columns in input data: {sorted(missing)}")
-
+    
     print("Loading pretrained Chronos-2 pipeline...")
     device = "cuda" if os.getenv("CUDA_VISIBLE_DEVICES", "") != "" else "cpu"
     pipeline = BaseChronosPipeline.from_pretrained(
@@ -249,18 +240,6 @@ def main():
     print(f"Prediction length: {args.prediction_length}")
     print(f"Quantiles: {quantiles}")
 
-    result_frames = []
-    context_columns = [args.timestamp_column,
-                    args.id_column, args.target_column]
-    future_cols = [args.timestamp_column,
-                    args.id_column, 'da_price']
-    if args.mode == "ARX":
-        context_columns.extend(args.features)
-        if args.add_temporal_features:
-            temporal_cols = ["Week_cos", "Week_sin", "Day_cos", "Day_sin", "Holidays"]
-            context_columns.extend(temporal_cols)
-            future_cols.extend(temporal_cols)
-    
     # Split cutoffs across workers
     chunks = [cutoff_dates[i::NUM_WORKERS] for i in range(NUM_WORKERS)]
 
@@ -290,11 +269,13 @@ def main():
     output_name = f"chronos2_{args.context_length}_{args.mode}"
     if args.add_temporal_features:
         output_name += "_temporal"
-    output_path = os.path.join(args.output_dir, f"{output_name}.csv")
+    
+    forecast_folder = os.path.join(args.output_dir, CONFIG['dataset_name'])
+    os.makedirs(forecast_folder, exist_ok=True)
+    output_path = os.path.join(forecast_folder, f"{output_name}.csv")
     print(f"Saving forecasts to {output_path}")
-    all_preds.drop(columns=[args.timestamp_column]
-                   ).to_csv(output_path, index=False)
-
+    all_preds.drop(columns=['predictions']).to_csv(output_path, index=False)
+    
     print("Zero-shot forecast complete.")
 
 

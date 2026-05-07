@@ -14,7 +14,7 @@ python3 run_zeroshot.py --config "./config_imb.json" --mode ARX --context-length
 ```bash
 cd scripts/
 pip install -r requirements.txt
-python run_dam.py --mode tune --config config.json --n-trials 30 --study-name dam_lora
+python run_dam.py --mode tune --config config_dam.json --n-trials 30 --study-name dam_lora
 ```
 
 Resume a halted study:
@@ -42,7 +42,7 @@ python run.py --mode infer --config config.json \
 cd scripts/
 # Clone repo first -- cannot install from PyPI
 git clone https://github.com/google-research/timesfm.git
-pip install -r requirements.txt
+pip install -e ./timesfm[torch]
 # DAM (default)
 python run_zeroshot_timesfm.py --config config_dam.json --allow-negative
 
