@@ -162,9 +162,9 @@ def main():
     predict_kwargs = dict(
         prediction_length=cfg['prediction_length'],
         quantile_levels=quantiles,
-        id_column='cutoff_date',
+        id_column='virtual_id',
         timestamp_column=cfg['timestamp_column'],
-        target=cfg['target_column'],
+        target=cfg['target_column']
     )
     result_frames = []
     BATCH_SIZE = cfg['infer_batch_size']
@@ -172,7 +172,7 @@ def main():
         batch_cutoffs = cutoff_dates[batch_start: batch_start + BATCH_SIZE]
         batch_contexts = []
         batch_futures = []
-        for cutoff in batch_cutoffs:
+        for i, cutoff in enumerate(batch_cutoffs):
             context_frame, future_frame = build_context_frame(
                 df_all,
                 cutoff,
@@ -183,20 +183,20 @@ def main():
                 future_cols,
                 is_imb
             )
-            context_frame['cutoff_date'] = cutoff  # id of the batch
+            context_frame['virtual_id'] = f"BE_DAM_{i}_{str(cutoff)}"  # id of the batch
             batch_contexts.append(context_frame)
 
             if len(future_frame) == 0:
                 has_future = False
                 continue
-            future_frame['cutoff_date'] = cutoff
+            future_frame['virtual_id'] = f"BE_DAM_{i}"
             batch_futures.append(future_frame)
 
-        batch_df = pd.concat(batch_contexts, ignore_index=True)
+        batch_df = pd.concat(batch_contexts, ignore_index=True).drop('id',axis=1)
 
         if has_future:
             predict_kwargs["future_df"] = pd.concat(
-                batch_futures, ignore_index=True)
+                batch_futures, ignore_index=True).drop('id',axis=1)
 
         pred_batch = pipeline.predict_df(batch_df, **predict_kwargs)
         result_frames.append(pred_batch)
@@ -204,10 +204,13 @@ def main():
     output_name = f"chronos2_{args.context_length}_{args.mode}"
     if args.add_temporal_features:
         output_name += "_temporal"
-    output_path = os.path.join(
-        args.output_dir+cfg['dataset_name'], f"{output_name}.csv")
+    
+    forecast_folder = os.path.join(args.output_dir,cfg['dataset_name'])
+    os.makedirs(forecast_folder, exist_ok=True)
+    output_path = os.path.join(forecast_folder, f"{output_name}.csv")
     print(f"Saving forecasts to {output_path}")
-    all_preds.to_csv(output_path, index=False)
+    all_preds.drop(columns=['predictions']).to_csv(output_path, index=False)
+    
     print("Zero-shot forecast complete.")
 
 

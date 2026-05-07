@@ -172,7 +172,8 @@ cython_debug/
 
 # data files
 baseline/*
-scripts/raw_forecast_dam/*
+scripts/raw_forecast/dam/*
+scripts/raw_forecast/imb/*
 
 # notebook draft files
 notebooks/
