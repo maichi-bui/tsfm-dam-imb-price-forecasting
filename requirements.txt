@@ -12,3 +12,4 @@ peft
 accelerate 
 optuna
 torch
+-e ./timesfm[torch]

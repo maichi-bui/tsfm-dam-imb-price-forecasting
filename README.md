@@ -35,3 +35,23 @@ python run.py --mode infer --config config.json \
 - [PEFT (LoRA)](https://github.com/huggingface/peft)
 - [Optuna docs](https://optuna.readthedocs.io/)
 - [Diebold-Mariano test](https://en.wikipedia.org/wiki/Diebold%E2%80%93Mariano_statistic)
+
+# TimesFM Inference
+
+```bash
+cd scripts/
+# Clone repo first -- cannot install from PyPI
+git clone https://github.com/google-research/timesfm.git
+pip install -r requirements.txt
+# DAM (default)
+python run_zeroshot_timesfm.py --config config_dam.json --allow-negative
+
+# Imbalance prices (can go negative → use --allow-negative)
+python run_zeroshot_timesfm.py --config config_imb.json --allow-negative
+
+# Smaller context, larger batch
+python run_zeroshot_timesfm.py --context-length 512 --batch-size 64
+
+# Skip torch.compile for faster startup during debugging
+python run_zeroshot_timesfm.py --no-compile
+```
