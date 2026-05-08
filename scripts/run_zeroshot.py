@@ -182,7 +182,7 @@ def main():
                 is_imb
             )
             # id of the batch
-            context_frame['virtual_id'] = f"BE_DAM_{i}_{str(cutoff)}"
+            context_frame['virtual_id'] = f"BE_{i}_{str(cutoff)}"
             batch_contexts.append(context_frame)
 
             if len(future_frame) == 0:
