@@ -127,7 +127,7 @@ def main():
     context_columns = [cfg['timestamp_column'],
                        args.id_column, cfg['target_column']]
     future_cols = [cfg['timestamp_column'],
-                   args.id_column]    
+                   args.id_column]
     has_future = False
 
     if args.mode == "ARX":
@@ -181,7 +181,8 @@ def main():
                 future_cols,
                 is_imb
             )
-            context_frame['virtual_id'] = f"BE_{i}_{str(cutoff)}"  # id of the batch
+            # id of the batch
+            context_frame['virtual_id'] = f"BE_DAM_{i}_{str(cutoff)}"
             batch_contexts.append(context_frame)
 
             if len(future_frame) == 0:
@@ -190,11 +191,12 @@ def main():
             future_frame['virtual_id'] = f"BE_{i}_{str(cutoff)}"
             batch_futures.append(future_frame)
 
-        batch_df = pd.concat(batch_contexts, ignore_index=True).drop('id',axis=1)
+        batch_df = pd.concat(
+            batch_contexts, ignore_index=True).drop('id', axis=1)
 
         if has_future:
             predict_kwargs["future_df"] = pd.concat(
-                batch_futures, ignore_index=True).drop('id',axis=1)
+                batch_futures, ignore_index=True).drop('id', axis=1)
 
         pred_batch = pipeline.predict_df(batch_df, **predict_kwargs)
         result_frames.append(pred_batch)
@@ -202,13 +204,13 @@ def main():
     output_name = f"chronos2_{args.context_length}_{args.mode}"
     if args.add_temporal_features:
         output_name += "_temporal"
-    
-    forecast_folder = os.path.join(args.output_dir,cfg['dataset_name'])
+
+    forecast_folder = os.path.join(args.output_dir, cfg['dataset_name'])
     os.makedirs(forecast_folder, exist_ok=True)
     output_path = os.path.join(forecast_folder, f"{output_name}.csv")
     print(f"Saving forecasts to {output_path}")
     all_preds.drop(columns=['predictions']).to_csv(output_path, index=False)
-    
+
     print("Zero-shot forecast complete.")
 
 
