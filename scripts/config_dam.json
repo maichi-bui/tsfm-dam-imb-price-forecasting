@@ -50,7 +50,13 @@
     "Temp",
     "Hum"
   ],
-  "future_covariates": [],
+  "future_covariates": [
+    "Solar",
+    "Wind",
+    "Load",
+    "Temp",
+    "Hum"
+  ],
   "temporal_covariates": [
     "Week_cos",
     "Week_sin",

@@ -5,7 +5,7 @@ This directory contains code for performing inference and hyperparameter tuning 
 ```bash
 cd scripts/
 pip install -r requirements.txt
-python3 run_zeroshot.py --config "./config_dam.json" --mode AR --context-length 1024 --forecast-end "2023-03-31"
+python3 run_zeroshot.py --config "./config_dam.json" --mode AR --context-length 1024 --add-temporal-features --forecast-end "2023-03-31" 
 python3 run_zeroshot.py --config "./config_imb.json" --mode ARX --context-length 2048 --add-temporal-features
 ```
 
