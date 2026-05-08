@@ -183,3 +183,6 @@ notebooks/
 
 # model dir
 scripts/model_dir/*
+
+# optuna output
+outputs/*

@@ -101,31 +101,45 @@ def run_inference(
     timestamp_col: str = "Date",
     target_col: str = "Price",
     id_col: str = "id",
+    batch_size: int = 1,
 ) -> pd.DataFrame:
     """
     Rolling 1-day-ahead quantile forecast over the given cutoff dates.
 
     At each cutoff the function slices the last ctx_len observations as context
     and calls pipeline.predict_df for the next prediction_length hours.
+    With batch_size > 1, multiple cutoffs are packed into a single predict_df
+    call via virtual series IDs for faster GPU inference.
 
     Returns a DataFrame with columns [Date, q0.1, q0.5, ...].
     """
-    all_preds = []
-    for cutoff in tqdm(cutoff_dates, desc="Rolling forecast"):
-        ctx_df = df_all[df_all[timestamp_col] < cutoff].iloc[-ctx_len:]
-        pred_df = pipeline.predict_df(
-            ctx_df,
-            prediction_length=prediction_length,
-            quantile_levels=quantile_levels,
-            id_column=id_col,
-            timestamp_column=timestamp_col,
-            target=target_col,
-        )
-        all_preds.append(pred_df)
+    predict_kwargs = dict(
+        prediction_length=prediction_length,
+        quantile_levels=quantile_levels,
+        id_column="virtual_id",
+        timestamp_column=timestamp_col,
+        target=target_col,
+    )
 
-    pred_all = pd.concat(all_preds, ignore_index=True)
+    result_frames = []
+    for batch_start in tqdm(range(0, len(cutoff_dates), batch_size), desc="Rolling forecast"):
+        batch_cutoffs = cutoff_dates[batch_start: batch_start + batch_size]
+        batch_contexts = []
+        for i, cutoff in enumerate(batch_cutoffs):
+            ctx_df = df_all[df_all[timestamp_col] < cutoff].iloc[-ctx_len:].copy()
+            ctx_df["virtual_id"] = f"series_{i}_{str(cutoff)}"
+            batch_contexts.append(ctx_df)
 
-    drop_cols = [c for c in ["id", "target_name", "predictions"] if c in pred_all.columns]
+        batch_df = pd.concat(batch_contexts, ignore_index=True)
+        if id_col in batch_df.columns:
+            batch_df = batch_df.drop(columns=[id_col])
+
+        pred_batch = pipeline.predict_df(batch_df, **predict_kwargs)
+        result_frames.append(pred_batch)
+
+    pred_all = pd.concat(result_frames, ignore_index=True)
+
+    drop_cols = [c for c in ["virtual_id", "target_name", "predictions"] if c in pred_all.columns]
     if "timestamp" in pred_all.columns and timestamp_col not in pred_all.columns:
         pred_all = pred_all.rename(columns={"timestamp": timestamp_col})
 

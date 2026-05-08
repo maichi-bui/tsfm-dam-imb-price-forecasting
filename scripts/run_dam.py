@@ -44,7 +44,7 @@ DEFAULT_CFG: dict = {
     "lora_target_modules": ["q", "k", "v"],
     "lr": 5e-5,
     "weight_decay": 0.01,
-    "batch_size": 16,
+    "batch_size": 64,
     "max_steps": 2000,
     "eval_every": 100,
     "patience": 5,
@@ -52,6 +52,7 @@ DEFAULT_CFG: dict = {
     "seed": 42,
     "num_workers": 2,
     "add_temporal_features": False,
+    "infer_batch_size": 64,
 }
 
 
@@ -292,6 +293,7 @@ def infer(cfg: dict, checkpoint_path: str) -> None:
         ctx_len=cfg["infer_context_length"],
         prediction_length=cfg["prediction_length"],
         quantile_levels=cfg["quantile_levels"],
+        batch_size=cfg["infer_batch_size"],
     )
 
     os.makedirs(os.path.dirname(cfg["forecast_csv"]), exist_ok=True)
