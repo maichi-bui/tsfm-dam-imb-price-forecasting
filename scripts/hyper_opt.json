@@ -1,20 +1,11 @@
 {
   "lora_r": {
     "type": "categorical",
-    "choices": [
-      4,
-      8,
-      16,
-      32
-    ]
+    "choices": [4, 8, 16, 32]
   },
   "lora_alpha": {
     "type": "categorical",
-    "choices": [
-      8,
-      16,
-      32
-    ]
+    "choices": [8, 16, 32]
   },
   "lora_dropout": {
     "type": "float",
@@ -28,32 +19,12 @@
     "high": 2e-4,
     "log": true
   },
-  "weight_decay": {
-    "type": "float",
-    "low": 0.0,
-    "high": 0.1,
-    "step": 0.01
-  },
   "batch_size": {
     "type": "categorical",
-    "choices": [
-      8,
-      16,
-      32
-    ]
-  },
-  "grad_clip": {
-    "type": "float",
-    "low": 0.5,
-    "high": 2.0,
-    "step": 0.5
+    "choices": [8, 16, 32]
   },
   "max_steps": {
     "type": "categorical",
-    "choices": [
-      1000,
-      2000,
-      3000
-    ]
+    "choices": [500, 1000, 1500]
   }
 }

@@ -1,64 +1,9 @@
 """
-datasets.py — Data loading and sliding-window dataset for Chronos-2 LoRA finetuning.
+datasets.py — Data loading and input preparation for Chronos-2 LoRA finetuning.
 """
 import holidays
 import numpy as np
 import pandas as pd
-import torch
-from torch.utils.data import Dataset, DataLoader
-
-
-class SlidingWindowDataset(Dataset):
-    """
-    Sliding window over a 1-D price series.
-
-    Context length is sampled randomly from context_lengths on each __getitem__,
-    giving effective diversity without multiplying the dataset size on disk.
-    Windows are anchored at the right edge so the target immediately follows.
-    """
-
-    def __init__(self, series: np.ndarray, context_lengths: list[int], prediction_length: int):
-        self.series = series
-        self.context_lengths = context_lengths
-        self.pred_len = prediction_length
-        self.max_ctx = max(context_lengths)
-        self.n = max(0, len(series) - self.max_ctx - prediction_length)
-        if self.n == 0:
-            raise ValueError(
-                f"Series too short ({len(series)}) for "
-                f"max_ctx={self.max_ctx} + pred_len={prediction_length}"
-            )
-
-    def __len__(self) -> int:
-        return self.n
-
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        ctx_len = int(np.random.choice(self.context_lengths))
-        ctx_end = idx + self.max_ctx
-        ctx_start = ctx_end - ctx_len
-        tgt_end = ctx_end + self.pred_len
-
-        context = torch.tensor(
-            self.series[ctx_start:ctx_end], dtype=torch.float32)
-        target = torch.tensor(
-            self.series[ctx_end:tgt_end], dtype=torch.float32)
-        return {"context": context, "target": target}
-
-
-def collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
-    """Left-pad variable-length contexts with NaN; Chronos ignores padded positions."""
-    max_ctx = max(b["context"].shape[0] for b in batch)
-    padded = []
-    for b in batch:
-        ctx = b["context"]
-        if ctx.shape[0] < max_ctx:
-            pad = torch.full((max_ctx - ctx.shape[0],), float("nan"))
-            ctx = torch.cat([pad, ctx])
-        padded.append(ctx)
-    return {
-        "context": torch.stack(padded),
-        "target": torch.stack([b["target"] for b in batch]),
-    }
 
 
 def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -99,47 +44,6 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# def add_temporal_features(df: pd.DataFrame, years_range: tuple[int, int] | None = None) -> pd.DataFrame:
-#     """
-#     Add cyclical temporal features and holiday indicator to a DataFrame.
-
-#     Adds columns:
-#       - Week_cos, Week_sin : day-of-week cyclical encoding
-#       - Day_cos, Day_sin   : hour-of-day cyclical encoding
-#       - Holidays           : Belgian holiday indicator (0/1)
-
-#     Parameters
-#     ----------
-#     df : DataFrame with DatetimeIndex
-#     years_range : (min_year, max_year) tuple for holiday lookup; defaults to index range
-
-#     Returns
-#     -------
-#     DataFrame with added temporal feature columns.
-#     """
-#     df = df.copy()
-#     idx = df.index if isinstance(
-#         df.index, pd.DatetimeIndex) else pd.to_datetime(df.index)
-
-#     # Day-of-week cyclical encoding
-#     day_of_week = idx.dayofweek / 7.0
-#     df["Week_cos"] = np.cos(2 * np.pi * day_of_week)
-#     df["Week_sin"] = np.sin(2 * np.pi * day_of_week)
-
-#     # Hour-of-day cyclical encoding
-#     hour_of_day = idx.hour / 24.0
-#     df["Day_cos"] = np.cos(2 * np.pi * hour_of_day)
-#     df["Day_sin"] = np.sin(2 * np.pi * hour_of_day)
-
-#     # Belgian holidays
-#     if years_range is None:
-#         years_range = (idx.year.min(), idx.year.max())
-#     belgian_holidays = holidays.Belgium(years=range(*years_range))
-#     df["Holidays"] = [int(date in belgian_holidays) for date in idx.date]
-
-#     return df
-
-
 def load_data(
     train_csv: str,
     test_csv: str,
@@ -147,22 +51,15 @@ def load_data(
     val_start: str,
     val_end: str,
     add_temporal_feats: bool = False,
-) -> tuple[np.ndarray, np.ndarray, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Load CSVs and split into finetune-train / finetune-val price arrays.
+    Load CSVs and return the full train and test DataFrames.
 
     Parameters
     ----------
     train_csv, test_csv : paths
-    train_end, val_start, val_end : date strings for splitting
+    train_end, val_start, val_end : date strings (used only for split-size logging)
     add_temporal_feats : if True, adds cyclical encodings and holidays to the DataFrames
-
-    Returns (train_prices, val_prices, df_train_full, df_test_full).
-
-    Note: prices are extracted as 1-D numpy arrays. Temporal features are added
-    to the full DataFrames if requested but are not used by default in the
-    SlidingWindowDataset. To use temporal features, you can extend SlidingWindowDataset
-    or add them as covariates in a custom forward_step.
     """
     df_train = (
         pd.read_csv(train_csv, parse_dates=["Date"])
@@ -191,9 +88,6 @@ def load_data(
     mask_tr = df_train["Date"] <= train_end
     mask_val = (df_train["Date"] >= val_start) & (df_train["Date"] <= val_end)
 
-    train_prices = df_train.loc[mask_tr, "Price"].values.astype(np.float32)
-    val_prices = df_train.loc[mask_val, "Price"].values.astype(np.float32)
-
     print(
         f"Train file : {df_train['Date'].min().date()} → {df_train['Date'].max().date()} "
         f"({len(df_train):,} rows)"
@@ -213,49 +107,61 @@ def load_data(
         f"{df_train.loc[mask_val, 'Date'].max().date()})"
     )
 
-    return train_prices, val_prices, df_train, df_test
+    return df_train, df_test
 
 
-def make_dataloaders(
-    train_prices: np.ndarray,
-    val_prices: np.ndarray,
-    context_lengths: list[int],
-    prediction_length: int,
-    batch_size: int,
-    num_workers: int = 2,
-) -> tuple[DataLoader, DataLoader]:
+def prepare_fit_inputs(
+    df_train: pd.DataFrame,
+    train_end: str,
+    val_start: str,
+    val_end: str,
+    past_cov_cols: list[str],
+    future_cov_cols: list[str],
+    temporal_cov_cols: list[str],
+    target_col: str = "Price",
+    max_context: int = 8192,
+) -> tuple[list[dict], list[dict]]:
     """
-    Build train and validation DataLoaders.
+    Build input dicts for pipeline.fit() with past and future covariates.
 
-    Val series is prepended with the last max(context_lengths) train observations
-    so early val windows have a full context.
+    Training: full training price series with all covariate histories.
+    Validation: prepend the last max_context training rows as context so
+    early val windows are not starved of history.
+
+    Physical covariates (Solar, Wind, Load, …) and temporal features
+    (Week_cos, …) are all future-known: their historical values go into
+    past_covariates, and future_covariates registers them with None to
+    signal they will be provided at prediction time.
     """
-    val_series = np.concatenate(
-        [train_prices[-max(context_lengths):], val_prices]
-    )
+    mask_tr = df_train["Date"] <= train_end
+    mask_val = (df_train["Date"] >= val_start) & (df_train["Date"] <= val_end)
 
-    train_ds = SlidingWindowDataset(
-        train_prices, context_lengths, prediction_length)
-    val_ds = SlidingWindowDataset(
-        val_series, context_lengths, prediction_length)
+    df_tr = df_train[mask_tr].reset_index(drop=True)
+    df_val = df_train[mask_val].reset_index(drop=True)
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        pin_memory=True,
-    )
+    # All covariates for which we have historical values
+    all_past = list(dict.fromkeys(past_cov_cols + temporal_cov_cols))
+    # Covariates that will be available as known-future at prediction time
+    all_future_known = list(dict.fromkeys(future_cov_cols + temporal_cov_cols))
 
-    print(f"Train windows : {len(train_ds):,}")
-    print(f"Val windows   : {len(val_ds):,}")
-    return train_loader, val_loader
+    def _build_input(df: pd.DataFrame) -> dict:
+        past_avail = [c for c in all_past if c in df.columns]
+        fut_avail = [c for c in all_future_known if c in df.columns]
+        return {
+            "target": df[target_col].values.astype(np.float32),
+            "past_covariates": {c: df[c].values.astype(np.float32) for c in past_avail},
+            "future_covariates": {c: None for c in fut_avail},
+        }
+
+    train_input = _build_input(df_tr)
+
+    # Prepend training tail so early val windows have a full context buffer
+    ctx_rows = df_tr.iloc[-max_context:] if len(df_tr) > max_context else df_tr
+    df_val_ctx = pd.concat([ctx_rows, df_val], ignore_index=True)
+    val_input = _build_input(df_val_ctx)
+
+    print(f"Train input : {len(df_tr):,} steps | covariates: {list(train_input['past_covariates'].keys())}")
+    print(f"Val input   : {len(df_val_ctx):,} steps ({len(df_val):,} val + {len(ctx_rows):,} context rows)")
+    print(f"Future-known: {list(train_input['future_covariates'].keys())}")
+
+    return [train_input], [val_input]

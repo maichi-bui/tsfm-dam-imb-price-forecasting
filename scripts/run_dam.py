@@ -7,15 +7,12 @@ import numpy as np
 import optuna
 import pandas as pd
 import torch
-import torch.nn as nn
 from optuna.samplers import TPESampler
-from tqdm import tqdm
 
-from datasets import load_data, make_dataloaders, add_temporal_features
-from model import build_lora_model, forward_step, load_finetuned_pipeline, run_inference
+from datasets import load_data, prepare_fit_inputs
+from model import finetune_pipeline, load_finetuned_pipeline, run_inference
 from utils import (
     mean_absolute_error,
-    plot_training_curve,
     root_mean_squared_error,
 )
 
@@ -43,29 +40,94 @@ DEFAULT_CFG: dict = {
     "lora_dropout": 0.1,
     "lora_target_modules": ["q", "k", "v"],
     "lr": 5e-5,
-    "weight_decay": 0.01,
     "batch_size": 64,
     "max_steps": 2000,
     "eval_every": 100,
-    "patience": 5,
-    "grad_clip": 1.0,
     "seed": 42,
-    "num_workers": 2,
-    "add_temporal_features": False,
     "infer_batch_size": 64,
+    "past_covariates": [],
+    "future_covariates": [],
+    "temporal_covariates": [],
+    "add_temporal_features": False,
 }
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _past_cov_cols(cfg: dict) -> list[str]:
+    """Deduplicated list of all past covariate columns (physical + temporal)."""
+    return list(dict.fromkeys(
+        cfg.get("past_covariates", []) + cfg.get("temporal_covariates", [])
+    ))
+
+
+def _future_cov_cols(cfg: dict) -> list[str]:
+    """Deduplicated list of all future-known covariate columns (physical + temporal)."""
+    return list(dict.fromkeys(
+        cfg.get("future_covariates", []) + cfg.get("temporal_covariates", [])
+    ))
+
+
+def _use_temporal(cfg: dict) -> bool:
+    return bool(cfg.get("temporal_covariates")) or cfg.get("add_temporal_features", False)
+
+
+def _eval_val_mae(
+    pipeline,
+    df_train: pd.DataFrame,
+    cfg: dict,
+    past_cov_cols: list[str],
+    future_cov_cols: list[str],
+) -> float:
+    """
+    Batched MAE over weekly val cutoffs — one GPU forward pass for all windows.
+
+    Samples one cutoff per week across the val period (typically ~13 windows),
+    packs them into a single predict_df call via run_inference, then joins
+    predictions back to actual prices by timestamp.  More representative than a
+    single-window eval and faster than per-cutoff calls.
+    """
+    pred_len = cfg["prediction_length"]
+
+    df = df_train.copy()
+    df["id"] = "val"
+
+    val_cutoffs = pd.date_range(cfg["val_start"], cfg["val_end"], freq="7D")
+
+    pred_df = run_inference(
+        pipeline,
+        df,
+        val_cutoffs,
+        ctx_len=cfg["infer_context_length"],
+        prediction_length=pred_len,
+        quantile_levels=[0.5],
+        past_cov_cols=past_cov_cols,
+        future_cov_cols=future_cov_cols,
+        batch_size=cfg["infer_batch_size"],
+    )
+
+    pred_col = "0.5" if "0.5" in pred_df.columns else "predictions"
+    pred_df = pred_df.sort_values("Date").reset_index(drop=True)
+    true_vals = (
+        df_train.set_index("Date")
+        .loc[pd.DatetimeIndex(pred_df["Date"].values), "Price"]
+        .values
+    )
+    return mean_absolute_error(true_vals, pred_df[pred_col].values)
 
 
 # ── Core training function ────────────────────────────────────────────────────
 
 def train(cfg: dict, trial: optuna.Trial | None = None) -> float:
     """
-    Train the LoRA model with the given config.
+    Fine-tune Chronos-2 with LoRA and covariates via the native pipeline.fit() API.
 
-    If `trial` is provided (Optuna mode), intermediate val losses are reported
-    for pruning and the function raises TrialPruned when appropriate.
+    Covariates come from config keys:
+      past_covariates    — physical features seen historically (Solar, Wind, …)
+      future_covariates  — same physical features available as day-ahead forecasts
+      temporal_covariates — deterministic calendar features (Week_cos, Holidays, …)
 
-    Returns the best validation loss achieved.
+    Returns val MAE of the first 24-h forecast window at val_start.
     """
     torch.manual_seed(cfg["seed"])
     np.random.seed(cfg["seed"])
@@ -77,121 +139,52 @@ def train(cfg: dict, trial: optuna.Trial | None = None) -> float:
 
     os.makedirs(cfg["output_dir"], exist_ok=True)
 
-    # Data
-    train_prices, val_prices, _, _ = load_data(
+    df_train, _ = load_data(
         cfg["train_csv"],
         cfg["test_csv"],
         cfg["train_end"],
         cfg["val_start"],
         cfg["val_end"],
-        add_temporal_feats=cfg.get("add_temporal_features", False),
-    )
-    train_loader, val_loader = make_dataloaders(
-        train_prices,
-        val_prices,
-        cfg["context_lengths"],
-        cfg["prediction_length"],
-        cfg["batch_size"],
-        cfg.get("num_workers", 2),
+        add_temporal_feats=_use_temporal(cfg),
     )
 
-    # Model
-    _, lora_model = build_lora_model(
+    train_inputs, val_inputs = prepare_fit_inputs(
+        df_train,
+        cfg["train_end"],
+        cfg["val_start"],
+        cfg["val_end"],
+        past_cov_cols=cfg.get("past_covariates", []),
+        future_cov_cols=cfg.get("future_covariates", []),
+        temporal_cov_cols=cfg.get("temporal_covariates", []),
+        max_context=max(cfg["context_lengths"]),
+    )
+
+    finetuned = finetune_pipeline(
         cfg["model_id"],
-        cfg["lora_r"],
-        cfg["lora_alpha"],
-        cfg["lora_dropout"],
-        cfg["lora_target_modules"],
+        train_inputs,
+        val_inputs,
+        cfg["prediction_length"],
+        cfg,
         device,
     )
 
-    # Optimiser + scheduler
-    trainable = [p for p in lora_model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(
-        trainable, lr=cfg["lr"], weight_decay=cfg["weight_decay"]
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=cfg["max_steps"], eta_min=cfg["lr"] * 0.1
-    )
-
-    best_val_loss = float("inf")
-    patience_counter = 0
-    train_losses: list[float] = []
-    val_log: list[tuple[int, float]] = []
-
-    train_iter = iter(train_loader)
-    pbar = tqdm(range(1, cfg["max_steps"] + 1), desc="Finetuning")
-
-    for step in pbar:
-        lora_model.train()
-        try:
-            batch = next(train_iter)
-        except StopIteration:
-            train_iter = iter(train_loader)
-            batch = next(train_iter)
-
-        optimizer.zero_grad()
-        loss = forward_step(lora_model, batch, device)
-        loss.backward()
-        nn.utils.clip_grad_norm_(trainable, cfg["grad_clip"])
-        optimizer.step()
-        scheduler.step()
-
-        train_losses.append(loss.item())
-        pbar.set_postfix(
-            {"train": f"{loss.item():.4f}",
-             "lr": f"{scheduler.get_last_lr()[0]:.1e}"}
-        )
-
-        if step % cfg["eval_every"] == 0:
-            lora_model.eval()
-            val_accum, n_val = 0.0, 0
-            with torch.no_grad():
-                for vb in val_loader:
-                    val_accum += forward_step(lora_model, vb, device).item()
-                    n_val += 1
-
-            avg_val = val_accum / n_val
-            avg_tr = float(np.mean(train_losses[-cfg["eval_every"]:]))
-            val_log.append((step, avg_val))
-
-            tqdm.write(
-                f"Step {step:4d} | train: {avg_tr:.4f} | val: {avg_val:.4f}"
-                f" | lr: {scheduler.get_last_lr()[0]:.1e}"
-            )
-
-            # Optuna pruning
-            if trial is not None:
-                trial.report(avg_val, step)
-                if trial.should_prune():
-                    raise optuna.TrialPruned()
-
-            if avg_val < best_val_loss:
-                best_val_loss = avg_val
-                patience_counter = 0
-                ckpt = os.path.join(cfg["output_dir"], "best_checkpoint")
-                lora_model.save_pretrained(ckpt)
-                tqdm.write(
-                    f"  >> New best val loss {best_val_loss:.4f} — saved to {ckpt}")
-            else:
-                patience_counter += 1
-                if patience_counter >= cfg["patience"]:
-                    tqdm.write(
-                        f"Early stopping at step {step} "
-                        f"(no improvement for {cfg['patience']} eval intervals)"
-                    )
-                    break
-
-    # Save final checkpoint, config, and training curve
-    lora_model.save_pretrained(os.path.join(
-        cfg["output_dir"], "final_checkpoint"))
+    ckpt = os.path.join(cfg["output_dir"], "best_checkpoint")
+    finetuned.model.save_pretrained(ckpt)
     with open(os.path.join(cfg["output_dir"], "run_config.json"), "w") as f:
-        json.dump({k: v for k, v in cfg.items() if isinstance(
-            v, (str, int, float, list, bool))}, f, indent=2)
-    plot_training_curve(train_losses, val_log, cfg["output_dir"])
+        json.dump(
+            {k: v for k, v in cfg.items() if isinstance(v, (str, int, float, list, bool))},
+            f,
+            indent=2,
+        )
+    print(f"\nTraining complete. Checkpoint saved to {ckpt}")
 
-    print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
-    return best_val_loss
+    val_mae = _eval_val_mae(finetuned, df_train, cfg, _past_cov_cols(cfg), _future_cov_cols(cfg))
+    print(f"Val MAE (first 24-h window): {val_mae:.4f}")
+
+    if trial is not None:
+        trial.report(val_mae, cfg["max_steps"])
+
+    return val_mae
 
 
 # ── Optuna objective ──────────────────────────────────────────────────────────
@@ -208,11 +201,8 @@ def _sample(trial: optuna.Trial, name: str, spec: dict):
     """Dispatch a single Optuna suggest call from a hyper_opt.json spec entry."""
     t = spec["type"]
     if t == "categorical":
-        # JSON lists-of-lists come in as lists; Optuna needs them hashable → tuple
-        choices = [tuple(c) if isinstance(c, list)
-                   else c for c in spec["choices"]]
+        choices = [tuple(c) if isinstance(c, list) else c for c in spec["choices"]]
         value = trial.suggest_categorical(name, choices)
-        # Convert back to plain list for the config
         return list(value) if isinstance(value, tuple) else value
     if t == "float":
         kwargs = {k: spec[k] for k in ("low", "high") if k in spec}
@@ -257,13 +247,14 @@ def _make_objective(base_cfg: dict, search_space: dict):
 
 def infer(cfg: dict, checkpoint_path: str) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    _, _, df_train, df_test = load_data(
+
+    df_train, df_test = load_data(
         cfg["train_csv"],
         cfg["test_csv"],
         cfg["train_end"],
         cfg["val_start"],
         cfg["val_end"],
-        add_temporal_feats=cfg.get("add_temporal_features", False),
+        add_temporal_feats=_use_temporal(cfg),
     )
 
     df_all = (
@@ -273,8 +264,10 @@ def infer(cfg: dict, checkpoint_path: str) -> None:
     )
     df_all["id"] = "BE_DAM"
 
-    pipeline = load_finetuned_pipeline(
-        cfg["model_id"], checkpoint_path, device)
+    pipeline = load_finetuned_pipeline(cfg["model_id"], checkpoint_path, device)
+
+    past_cols = _past_cov_cols(cfg)
+    fut_cols = _future_cov_cols(cfg)
 
     cutoff_dates = pd.date_range(
         start=cfg["forecast_start"],
@@ -285,6 +278,10 @@ def infer(cfg: dict, checkpoint_path: str) -> None:
         f"Generating {len(cutoff_dates)} daily forecasts "
         f"({cutoff_dates[0].date()} → {cutoff_dates[-1].date()})..."
     )
+    if past_cols:
+        print(f"Past covariates  : {[c for c in past_cols if c in df_all.columns]}")
+    if fut_cols:
+        print(f"Future covariates: {[c for c in fut_cols if c in df_all.columns]}")
 
     pred_df = run_inference(
         pipeline,
@@ -293,6 +290,8 @@ def infer(cfg: dict, checkpoint_path: str) -> None:
         ctx_len=cfg["infer_context_length"],
         prediction_length=cfg["prediction_length"],
         quantile_levels=cfg["quantile_levels"],
+        past_cov_cols=past_cols,
+        future_cov_cols=fut_cols,
         batch_size=cfg["infer_batch_size"],
     )
 
@@ -301,15 +300,12 @@ def infer(cfg: dict, checkpoint_path: str) -> None:
     print(f"Saved {len(pred_df):,} rows → {cfg['forecast_csv']}")
     print(f"Date range: {pred_df['Date'].min()} → {pred_df['Date'].max()}")
 
-    # Quick point-forecast MAE on the test period (2024)
     test_mask = pred_df["Date"] >= "2024-01-01"
     if test_mask.any() and "0.5" in pred_df.columns:
-        df_test_2024 = df_test[df_test["Date"]
-                               >= "2024-01-01"].sort_values("Date")
+        df_test_2024 = df_test[df_test["Date"] >= "2024-01-01"].sort_values("Date")
         preds_2024 = pred_df.loc[test_mask, "0.5"].values
         mae = mean_absolute_error(df_test_2024["Price"].values, preds_2024)
-        rmse = root_mean_squared_error(
-            df_test_2024["Price"].values, preds_2024)
+        rmse = root_mean_squared_error(df_test_2024["Price"].values, preds_2024)
         print(f"\n2024 test set — MAE: {mae:.3f}  RMSE: {rmse:.3f}")
 
 
@@ -422,7 +418,6 @@ def main() -> None:
             json.dump(best, f, indent=2)
         print(f"\nBest params saved to {best_params_path}")
 
-        # Re-train with best params on the full budget
         print("\nRe-training with best hyperparameters...")
         cfg_best = cfg.copy()
         cfg_best.update(best)

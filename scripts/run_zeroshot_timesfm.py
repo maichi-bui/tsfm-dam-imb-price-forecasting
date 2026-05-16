@@ -121,7 +121,6 @@ def main() -> None:
     model = TimesFM_2p5_200M_torch.from_pretrained(
         "google/timesfm-2.5-200m-pytorch",
         torch_compile=not args.no_compile,
-        # cache_dir='model_dir/pretrain_timesfm25/'
     )
 
     print("Compiling with ForecastConfig…")

@@ -1,79 +1,54 @@
 """
-model.py — Chronos-2 LoRA model construction, forward step, and inference.
+model.py — Chronos-2 fine-tuning (native pipeline.fit API) and rolling inference.
 """
 
-import math
 import os
 
 import numpy as np
 import pandas as pd
 import torch
-from peft import LoraConfig, PeftModel, get_peft_model
+from peft import LoraConfig, PeftModel
 from chronos import BaseChronosPipeline
 from tqdm import tqdm
 
+from run_zeroshot import build_context_frame
 
-def build_lora_model(
+
+def finetune_pipeline(
     model_id: str,
-    lora_r: int,
-    lora_alpha: int,
-    lora_dropout: float,
-    lora_target_modules: list[str],
+    train_inputs: list[dict],
+    val_inputs: list[dict],
+    prediction_length: int,
+    cfg: dict,
     device: str,
-) -> tuple:
+) -> BaseChronosPipeline:
     """
-    Load the base Chronos-2 pipeline, wrap its backbone with LoRA, and move to device.
+    Fine-tune Chronos-2 with LoRA using the native pipeline.fit() API.
 
-    Returns (pipeline, lora_model) where lora_model is the LoRA-wrapped backbone.
-    The pipeline's .model attribute is replaced with lora_model so predict_df still works.
+    train_inputs / val_inputs are lists of dicts with keys:
+      target, past_covariates, future_covariates
+    as produced by datasets.prepare_fit_inputs().
     """
-    pipeline = BaseChronosPipeline.from_pretrained(model_id, device_map="cpu")
-    base_model = pipeline.model
-
-    total = sum(p.numel() for p in base_model.parameters())
-    print(f"Base model : {type(base_model).__name__}  ({total / 1e6:.1f}M params)")
+    pipeline = BaseChronosPipeline.from_pretrained(model_id, device_map=device)
 
     lora_config = LoraConfig(
-        r=lora_r,
-        lora_alpha=lora_alpha,
-        target_modules=lora_target_modules,
-        lora_dropout=lora_dropout,
-        bias="none",
+        r=cfg["lora_r"],
+        lora_alpha=cfg["lora_alpha"],
+        lora_dropout=cfg["lora_dropout"],
+        target_modules=cfg["lora_target_modules"],
     )
-    lora_model = get_peft_model(base_model, lora_config)
-    lora_model.print_trainable_parameters()
-    lora_model = lora_model.to(device)
 
-    pipeline.model = lora_model
-    return pipeline, lora_model
-
-
-def forward_step(
-    lora_model: torch.nn.Module,
-    batch: dict[str, torch.Tensor],
-    device: str,
-) -> torch.Tensor:
-    """
-    Single differentiable step using Chronos-2's internal _compute_loss.
-
-    NaN-padded positions in context are zeroed out before the forward pass;
-    the model's instance_norm derives the scale from the non-padded region.
-    """
-    context = batch["context"].to(device)
-    target = batch["target"].to(device)
-
-    inner = lora_model.base_model.model
-    output_patch_size = inner.chronos_config.output_patch_size
-    num_output_patches = math.ceil(target.shape[1] / output_patch_size)
-
-    context_clean = torch.nan_to_num(context, nan=0.0)
-
-    output = lora_model(
-        context=context_clean,
-        future_target=target,
-        num_output_patches=num_output_patches,
+    return pipeline.fit(
+        inputs=train_inputs,
+        prediction_length=prediction_length,
+        num_steps=cfg["max_steps"],
+        learning_rate=cfg["lr"],
+        batch_size=cfg["batch_size"],
+        logging_steps=cfg.get("eval_every", 100),
+        finetune_mode="lora",
+        lora_config=lora_config,
+        validation_inputs=val_inputs,
     )
-    return output.loss
 
 
 def load_finetuned_pipeline(
@@ -81,9 +56,7 @@ def load_finetuned_pipeline(
     checkpoint_path: str,
     device: str,
 ) -> BaseChronosPipeline:
-    """
-    Reload the base pipeline and attach a saved LoRA adapter for inference.
-    """
+    """Reload the base pipeline and attach a saved LoRA adapter for inference."""
     pipeline = BaseChronosPipeline.from_pretrained(model_id, device_map=device)
     pipeline.model = PeftModel.from_pretrained(pipeline.model, checkpoint_path)
     pipeline.model.eval()
@@ -98,21 +71,37 @@ def run_inference(
     ctx_len: int,
     prediction_length: int,
     quantile_levels: list[float],
+    past_cov_cols: list[str],
+    future_cov_cols: list[str],
     timestamp_col: str = "Date",
     target_col: str = "Price",
     id_col: str = "id",
-    batch_size: int = 1,
+    batch_size: int = 32,
 ) -> pd.DataFrame:
     """
-    Rolling 1-day-ahead quantile forecast over the given cutoff dates.
+    Rolling 1-day-ahead quantile forecast with future covariates.
 
-    At each cutoff the function slices the last ctx_len observations as context
-    and calls pipeline.predict_df for the next prediction_length hours.
-    With batch_size > 1, multiple cutoffs are packed into a single predict_df
-    call via virtual series IDs for faster GPU inference.
+    Uses build_context_frame() from run_zeroshot.py to slice context and
+    future DataFrames consistently with the zero-shot inference pipeline.
+    Multiple cutoffs are packed into a single predict_df call via virtual
+    series IDs for faster GPU throughput.
 
-    Returns a DataFrame with columns [Date, q0.1, q0.5, ...].
+    context_cols  = [timestamp, id, target] + past_cov_cols (what the model sees historically)
+    future_cols   = [timestamp, id] + future_cov_cols       (known-future values for next 24 h)
+
+    future_df is only passed to predict_df when at least one future covariate
+    is available in df_all, mirroring the has_future logic in run_zeroshot.py.
     """
+    # Build column lists as run_zeroshot.py does for ARX mode
+    context_cols = [timestamp_col, id_col, target_col] + [
+        c for c in past_cov_cols if c in df_all.columns
+    ]
+    future_cols_list = [timestamp_col, id_col] + [
+        c for c in future_cov_cols if c in df_all.columns
+    ]
+    # future_cols_list has > 2 entries only when covariates are present
+    has_future = len(future_cols_list) > 2
+
     predict_kwargs = dict(
         prediction_length=prediction_length,
         quantile_levels=quantile_levels,
@@ -124,15 +113,41 @@ def run_inference(
     result_frames = []
     for batch_start in tqdm(range(0, len(cutoff_dates), batch_size), desc="Rolling forecast"):
         batch_cutoffs = cutoff_dates[batch_start: batch_start + batch_size]
-        batch_contexts = []
+        batch_contexts, batch_futures = [], []
+        batch_has_future = has_future
+
         for i, cutoff in enumerate(batch_cutoffs):
-            ctx_df = df_all[df_all[timestamp_col] < cutoff].iloc[-ctx_len:].copy()
-            ctx_df["virtual_id"] = f"series_{i}_{str(cutoff)}"
-            batch_contexts.append(ctx_df)
+            vid = f"BE_{i}_{str(cutoff)}"
+
+            ctx_frame, fut_frame = build_context_frame(
+                df_all,
+                cutoff,
+                ctx_len,
+                timestamp_col,
+                prediction_length,
+                context_cols,
+                future_cols_list,
+            )
+            ctx_frame["virtual_id"] = vid
+            batch_contexts.append(ctx_frame)
+
+            if fut_frame.empty:
+                batch_has_future = False
+                continue
+            fut_frame["virtual_id"] = vid
+            batch_futures.append(fut_frame)
 
         batch_df = pd.concat(batch_contexts, ignore_index=True)
         if id_col in batch_df.columns:
             batch_df = batch_df.drop(columns=[id_col])
+
+        if batch_has_future and batch_futures:
+            fut_df = pd.concat(batch_futures, ignore_index=True)
+            if id_col in fut_df.columns:
+                fut_df = fut_df.drop(columns=[id_col])
+            predict_kwargs["future_df"] = fut_df
+        else:
+            predict_kwargs.pop("future_df", None)
 
         pred_batch = pipeline.predict_df(batch_df, **predict_kwargs)
         result_frames.append(pred_batch)
