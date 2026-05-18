@@ -6,7 +6,7 @@
   "timestamp_column": "Date",
   "target_column": "Price",
   "output_dir": "../outputs/chronos2_lora",
-  "forecast_csv": "../raw_forecasts_dam/chronos2_lora_tuned.csv",
+  "forecast_csv": "../scripts/raw_forecast/dam/chronos2_lora_tuned.csv",
   "train_end": "2023-09-30 23:00:00",
   "val_start": "2023-10-01 00:00:00",
   "val_end": "2023-12-31 23:00:00",
