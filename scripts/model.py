@@ -45,6 +45,7 @@ def finetune_pipeline(
         learning_rate=cfg["lr"],
         batch_size=cfg["batch_size"],
         logging_steps=cfg.get("eval_every", 100),
+        context_length=max(cfg["context_lengths"]),
         finetune_mode="lora",
         lora_config=lora_config,
         validation_inputs=val_inputs,

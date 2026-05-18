@@ -16,7 +16,7 @@
     "step": "15 minutes",
     "infer_batch_size": 32,
     "context_lengths": [
-        8192
+        512
     ],
     "infer_context_length": 1024,
     "prediction_length": 8,
