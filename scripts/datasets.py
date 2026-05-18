@@ -51,6 +51,7 @@ def load_data(
     val_start: str,
     val_end: str,
     add_temporal_feats: bool = False,
+    timestamp_col: str = "Date",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Load CSVs and return the full train and test DataFrames.
@@ -60,51 +61,50 @@ def load_data(
     train_csv, test_csv : paths
     train_end, val_start, val_end : date strings (used only for split-size logging)
     add_temporal_feats : if True, adds cyclical encodings and holidays to the DataFrames
+    timestamp_col : name of the datetime column in the CSVs
     """
     df_train = (
-        pd.read_csv(train_csv, parse_dates=["Date"])
-        .sort_values("Date")
-        .set_index("Date")
+        pd.read_csv(train_csv, parse_dates=[timestamp_col])
+        .sort_values(timestamp_col)
         .drop(columns=["Price_DE_LU"], errors="ignore")
-        .reset_index()
+        .reset_index(drop=True)
     )
     df_test = (
-        pd.read_csv(test_csv, parse_dates=["Date"])
-        .sort_values("Date")
-        .set_index("Date")
+        pd.read_csv(test_csv, parse_dates=[timestamp_col])
+        .sort_values(timestamp_col)
         .drop(columns=["Price_DE_LU"], errors="ignore")
-        .reset_index()
+        .reset_index(drop=True)
     )
 
     if add_temporal_feats:
-        df_train = df_train.set_index("Date")
-        df_test = df_test.set_index("Date")
+        df_train = df_train.set_index(timestamp_col)
+        df_test = df_test.set_index(timestamp_col)
         df_train = add_temporal_features(df_train)
         df_test = add_temporal_features(df_test)
         df_train = df_train.reset_index()
         df_test = df_test.reset_index()
         print("Temporal features added: Week_cos, Week_sin, Day_cos, Day_sin, Holidays")
 
-    mask_tr = df_train["Date"] <= train_end
-    mask_val = (df_train["Date"] >= val_start) & (df_train["Date"] <= val_end)
+    mask_tr = df_train[timestamp_col] <= train_end
+    mask_val = (df_train[timestamp_col] >= val_start) & (df_train[timestamp_col] <= val_end)
 
     print(
-        f"Train file : {df_train['Date'].min().date()} → {df_train['Date'].max().date()} "
+        f"Train file : {df_train[timestamp_col].min()} → {df_train[timestamp_col].max()} "
         f"({len(df_train):,} rows)"
     )
     print(
-        f"Test file  : {df_test['Date'].min().date()} → {df_test['Date'].max().date()} "
+        f"Test file  : {df_test[timestamp_col].min()} → {df_test[timestamp_col].max()} "
         f"({len(df_test):,} rows)"
     )
     print(
-        f"Finetune train : {mask_tr.sum():,} hours "
-        f"({df_train.loc[mask_tr, 'Date'].min().date()} → "
-        f"{df_train.loc[mask_tr, 'Date'].max().date()})"
+        f"Finetune train : {mask_tr.sum():,} steps "
+        f"({df_train.loc[mask_tr, timestamp_col].min()} → "
+        f"{df_train.loc[mask_tr, timestamp_col].max()})"
     )
     print(
-        f"Finetune val   : {mask_val.sum():,} hours "
-        f"({df_train.loc[mask_val, 'Date'].min().date()} → "
-        f"{df_train.loc[mask_val, 'Date'].max().date()})"
+        f"Finetune val   : {mask_val.sum():,} steps "
+        f"({df_train.loc[mask_val, timestamp_col].min()} → "
+        f"{df_train.loc[mask_val, timestamp_col].max()})"
     )
 
     return df_train, df_test
@@ -119,6 +119,7 @@ def prepare_fit_inputs(
     future_cov_cols: list[str],
     temporal_cov_cols: list[str],
     target_col: str = "Price",
+    timestamp_col: str = "Date",
     max_context: int = 8192,
 ) -> tuple[list[dict], list[dict]]:
     """
@@ -133,8 +134,8 @@ def prepare_fit_inputs(
     past_covariates, and future_covariates registers them with None to
     signal they will be provided at prediction time.
     """
-    mask_tr = df_train["Date"] <= train_end
-    mask_val = (df_train["Date"] >= val_start) & (df_train["Date"] <= val_end)
+    mask_tr = df_train[timestamp_col] <= train_end
+    mask_val = (df_train[timestamp_col] >= val_start) & (df_train[timestamp_col] <= val_end)
 
     df_tr = df_train[mask_tr].reset_index(drop=True)
     df_val = df_train[mask_val].reset_index(drop=True)

@@ -31,6 +31,8 @@ DEFAULT_CFG: dict = {
     "val_end": "2022-12-31 23:00:00",
     "forecast_start": "2023-01-01",
     "forecast_end": "2025-01-01",
+    "horizon": "1D",
+    "step": "1D",
     "context_lengths": [8192],
     "infer_context_length": 2048,
     "prediction_length": 24,
@@ -45,6 +47,8 @@ DEFAULT_CFG: dict = {
     "eval_every": 100,
     "seed": 42,
     "infer_batch_size": 64,
+    "timestamp_column": "Date",
+    "target_column": "Price",
     "past_covariates": [],
     "future_covariates": [],
     "temporal_covariates": [],
@@ -87,6 +91,8 @@ def _eval_val_mae(
     predictions back to actual prices by timestamp.  More representative than a
     single-window eval and faster than per-cutoff calls.
     """
+    ts_col = cfg["timestamp_column"]
+    tgt_col = cfg["target_column"]
     pred_len = cfg["prediction_length"]
 
     df = df_train.copy()
@@ -103,14 +109,16 @@ def _eval_val_mae(
         quantile_levels=[0.5],
         past_cov_cols=past_cov_cols,
         future_cov_cols=future_cov_cols,
+        timestamp_col=ts_col,
+        target_col=tgt_col,
         batch_size=cfg["infer_batch_size"],
     )
 
     pred_col = "0.5" if "0.5" in pred_df.columns else "predictions"
-    pred_df = pred_df.sort_values("Date").reset_index(drop=True)
+    pred_df = pred_df.sort_values(ts_col).reset_index(drop=True)
     true_vals = (
-        df_train.set_index("Date")
-        .loc[pd.DatetimeIndex(pred_df["Date"].values), "Price"]
+        df_train.set_index(ts_col)
+        .loc[pd.DatetimeIndex(pred_df[ts_col].values), tgt_col]
         .values
     )
     return mean_absolute_error(true_vals, pred_df[pred_col].values)
@@ -146,6 +154,7 @@ def train(cfg: dict, trial: optuna.Trial | None = None) -> float:
         cfg["val_start"],
         cfg["val_end"],
         add_temporal_feats=_use_temporal(cfg),
+        timestamp_col=cfg["timestamp_column"],
     )
 
     train_inputs, val_inputs = prepare_fit_inputs(
@@ -156,6 +165,8 @@ def train(cfg: dict, trial: optuna.Trial | None = None) -> float:
         past_cov_cols=cfg.get("past_covariates", []),
         future_cov_cols=cfg.get("future_covariates", []),
         temporal_cov_cols=cfg.get("temporal_covariates", []),
+        target_col=cfg["target_column"],
+        timestamp_col=cfg["timestamp_column"],
         max_context=max(cfg["context_lengths"]),
     )
 
@@ -247,6 +258,8 @@ def _make_objective(base_cfg: dict, search_space: dict):
 
 def infer(cfg: dict, checkpoint_path: str) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    ts_col = cfg["timestamp_column"]
+    tgt_col = cfg["target_column"]
 
     df_train, df_test = load_data(
         cfg["train_csv"],
@@ -255,14 +268,15 @@ def infer(cfg: dict, checkpoint_path: str) -> None:
         cfg["val_start"],
         cfg["val_end"],
         add_temporal_feats=_use_temporal(cfg),
+        timestamp_col=ts_col,
     )
 
     df_all = (
         pd.concat([df_train, df_test])
-        .sort_values("Date")
+        .sort_values(ts_col)
         .reset_index(drop=True)
     )
-    df_all["id"] = "BE_DAM"
+    df_all["id"] = cfg.get("dataset_name", "series")
 
     pipeline = load_finetuned_pipeline(cfg["model_id"], checkpoint_path, device)
 
@@ -271,12 +285,12 @@ def infer(cfg: dict, checkpoint_path: str) -> None:
 
     cutoff_dates = pd.date_range(
         start=cfg["forecast_start"],
-        end=pd.Timestamp(cfg["forecast_end"]) - pd.Timedelta("1D"),
-        freq="1D",
+        end=pd.Timestamp(cfg["forecast_end"]) - pd.Timedelta(cfg["horizon"]),
+        freq=pd.Timedelta(cfg["step"]),
     )
     print(
-        f"Generating {len(cutoff_dates)} daily forecasts "
-        f"({cutoff_dates[0].date()} → {cutoff_dates[-1].date()})..."
+        f"Generating {len(cutoff_dates)} forecasts "
+        f"({cutoff_dates[0]} → {cutoff_dates[-1]})..."
     )
     if past_cols:
         print(f"Past covariates  : {[c for c in past_cols if c in df_all.columns]}")
@@ -292,21 +306,24 @@ def infer(cfg: dict, checkpoint_path: str) -> None:
         quantile_levels=cfg["quantile_levels"],
         past_cov_cols=past_cols,
         future_cov_cols=fut_cols,
+        timestamp_col=ts_col,
+        target_col=tgt_col,
         batch_size=cfg["infer_batch_size"],
     )
 
     os.makedirs(os.path.dirname(cfg["forecast_csv"]), exist_ok=True)
     pred_df.to_csv(cfg["forecast_csv"], index=False)
     print(f"Saved {len(pred_df):,} rows → {cfg['forecast_csv']}")
-    print(f"Date range: {pred_df['Date'].min()} → {pred_df['Date'].max()}")
+    print(f"Range: {pred_df[ts_col].min()} → {pred_df[ts_col].max()}")
 
-    test_mask = pred_df["Date"] >= "2024-01-01"
-    if test_mask.any() and "0.5" in pred_df.columns:
-        df_test_2024 = df_test[df_test["Date"] >= "2024-01-01"].sort_values("Date")
-        preds_2024 = pred_df.loc[test_mask, "0.5"].values
-        mae = mean_absolute_error(df_test_2024["Price"].values, preds_2024)
-        rmse = root_mean_squared_error(df_test_2024["Price"].values, preds_2024)
-        print(f"\n2024 test set — MAE: {mae:.3f}  RMSE: {rmse:.3f}")
+    if "0.5" in pred_df.columns:
+        test_mask = pred_df[ts_col] >= cfg["forecast_start"]
+        df_test_eval = df_test[df_test[ts_col] >= cfg["forecast_start"]].sort_values(ts_col)
+        if test_mask.any() and len(df_test_eval):
+            preds = pred_df.loc[test_mask, "0.5"].values[:len(df_test_eval)]
+            mae = mean_absolute_error(df_test_eval[tgt_col].values[:len(preds)], preds)
+            rmse = root_mean_squared_error(df_test_eval[tgt_col].values[:len(preds)], preds)
+            print(f"\nForecast period — MAE: {mae:.3f}  RMSE: {rmse:.3f}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
