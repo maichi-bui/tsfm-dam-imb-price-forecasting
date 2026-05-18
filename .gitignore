@@ -176,7 +176,7 @@ scripts/raw_forecast/dam/*
 scripts/raw_forecast/imb/*
 
 # notebook draft files
-# notebooks/
+notebooks/
 .DS_Store
 .log
 *.sh
