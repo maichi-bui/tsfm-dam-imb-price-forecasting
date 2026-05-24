@@ -84,12 +84,6 @@ def _eval_val_mae(
     future_cov_cols: list[str],
 ) -> float:
     """
-    Batched MAE over weekly val cutoffs — one GPU forward pass for all windows.
-
-    Samples one cutoff per week across the val period (typically ~13 windows),
-    packs them into a single predict_df call via run_inference, then joins
-    predictions back to actual prices by timestamp.  More representative than a
-    single-window eval and faster than per-cutoff calls.
     """
     ts_col = cfg["timestamp_column"]
     tgt_col = cfg["target_column"]
@@ -97,16 +91,21 @@ def _eval_val_mae(
 
     df = df_train.copy()
     df["id"] = "val"
+    df[ts_col] = pd.to_datetime(
+        df[ts_col]).dt.tz_localize(None)
 
-    val_cutoffs = pd.date_range(cfg["val_start"], cfg["val_end"], freq="7D")
-
+    val_cutoffs = pd.date_range(
+        start=cfg["forecast_start"],
+        end=pd.Timestamp(cfg["forecast_end"]) - pd.Timedelta(cfg["horizon"]),
+        freq=pd.Timedelta(cfg["step"]),
+    )
     pred_df = run_inference(
         pipeline,
         df,
         val_cutoffs,
         ctx_len=cfg["infer_context_length"],
         prediction_length=pred_len,
-        quantile_levels=[0.5],
+        quantile_levels=cfg['quantile_levels'],
         past_cov_cols=past_cov_cols,
         future_cov_cols=future_cov_cols,
         timestamp_col=ts_col,

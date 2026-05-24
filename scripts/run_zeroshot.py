@@ -75,6 +75,9 @@ def build_context_frame(
     future_cov_columns: Iterable[str],
     is_imb=False
 ):
+    if timestamp_column == 'timestamp':
+        is_imb = True
+    df_all[timestamp_column] = df_all[timestamp_column].dt.tz_localize(None)
     context = df_all[df_all[timestamp_column] < cutoff].iloc[-context_length:]
     if len(future_cov_columns) > 2:
         # hard-code by prediction length unit by hour

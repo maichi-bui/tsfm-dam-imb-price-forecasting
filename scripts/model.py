@@ -131,7 +131,7 @@ def run_inference(
             )
             ctx_frame["virtual_id"] = vid
             batch_contexts.append(ctx_frame)
-
+            
             if fut_frame.empty:
                 batch_has_future = False
                 continue
@@ -143,6 +143,8 @@ def run_inference(
             batch_df = batch_df.drop(columns=[id_col])
 
         if batch_has_future and batch_futures:
+            if i == 0:
+                print(batch_futures)
             fut_df = pd.concat(batch_futures, ignore_index=True)
             if id_col in fut_df.columns:
                 fut_df = fut_df.drop(columns=[id_col])
